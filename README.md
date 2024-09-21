@@ -11,4 +11,4 @@ These notebooks show workflows for using CUDA from Python.
 
 For usage information, see the script files in each folder.
 
-You can find a lot more examples of how to use Modal in the [examples repository](https://github.com/modal/modal-examples).
+You can find a lot more examples of how to use Modal in the [examples repository](https://github.com/modal-labs/modal-examples).
