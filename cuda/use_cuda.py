@@ -1,69 +1,118 @@
-# # Using CUDA on Modal
+# # Compiling CUDA programs on Modal
 #
-# CUDA is not one library, but a stack with multiple layers:
-#
-# - The NVIDIA CUDA Drivers
-#   - kernel-level components, like `nvidia.ko`
-#   - the user-level CUDA Driver API, `libcuda.so`
-# - The NVIDIA CUDA Toolkit
-#   - the CUDA Runtime API (`libcudart.so`)
-#   - the NVIDIA CUDA compiler (`nvcc`)
-#   - and more goodies (`cuobjdump`, profilers, `cudnn`, etc.)
-#
-# Most folks running code on GPUs don't use these things directly,
-# and instead use them via a higher-level library like TensorFlow or PyTorch.
-#
-# But when configuring environments to run ML applications,
-# even using those higher-level libraries, issues with the CUDA stack
-# still arise and cause major headaches.
-#
-# In this tutorial, we'll tour the NVIDIA CUDA stack layer by layer,
-# showing how to use it (and break it!) on Modal.
+# In this tutorial, we'll demonstrate how to compile CUDA programs on Modal.
+# This is intended as a beginner-friendly but detailed guide to working with CUDA on Modal.
 #
 # For a quick summary of the CUDA stack on Modal, see the
 # [CUDA guide](https://modal.com/docs/guides/cuda).
 # in the docs.
 #
 # As our test problem, we will run the classic
-# fast inverse square root algorithm from the late 1900s
+# fast reciprocal square root algorithm from the late 1900s
 # first-person shooter game Quake III Arena
 # on every single 32 bit floating point number.
+
+# First, we'll do our Modal setup: importing the `modal` client library and
+# defining our Modal App.
 
 from pathlib import Path
 
 import modal
 
-app = modal.App()
+app = modal.App("example-cuda-fast-invsqrt")
+
+# ## Compute Capability and Streaming Multiprocessor Architecture
+
+# One notable feature of GPUs is that they are essentially
+# only used when CPUs are not able to handle a workload with sufficient performance.
+# Just as no one writes multiprocess or multithread code
+# for the CPU because it is so fun and easy,
+# no one writes code to run on GPUs for the sheer delight.
+#
+# Because of this, GPU code is inherently performance-sensitive,
+# and performance is the enemy of abstraction.
+# So, for example, we frequently need to know the precise GPU
+# architecture our code will run on at the time we write it --
+# let alone compile it.
+#
+# The most important piece of information about a GPU
+# is the _Compute Capability_, also known as the
+# _Streaming Multiprocessor Architecture_.
+# Streaming Multiprocessors (SMs), are the execution units of GPUs,
+# akin to the cores of a CPU -- though they are themselves composed of cores.
+# Different SM architectures have distinct capabilities
+# and support distinct instruction sets.
+
+GPU_CONFIG = modal.gpu.H100()  # highest CC on Modal
+COMPILE_CONFIG = modal.gpu.T4()  # lowest CC on Modal
+
+
+if isinstance(COMPILE_CONFIG, modal.gpu.T4):
+    GPU_SM_ARCH = "75"  # Turing 12nm microarchitecture
+elif isinstance(COMPILE_CONFIG, modal.gpu.A100):
+    GPU_SM_ARCH = "80"  # Ampere 7nm microarchitecture
+elif isinstance(COMPILE_CONFIG, modal.gpu.A10G):
+    GPU_SM_ARCH = "86"  # Ampere 8nm microarchitecture
+elif isinstance(COMPILE_CONFIG, modal.gpu.L4):
+    GPU_SM_ARCH = "89"  # Lovelace 5nm microarchitecture
+elif isinstance(COMPILE_CONFIG, modal.gpu.H100):
+    GPU_SM_ARCH = "90"  # Hopper 5nm microarchitecture
+else:
+    raise ValueError(
+        f"Not sure how to compile architecture-specific code for {COMPILE_CONFIG}"
+    )
+
+# ## Overview: Compiling, executing, and inspecting CUDA binaries on Modal
+#
+# In this example, we will compile a simple CUDA program,
+# inspect its contents, and run it.
+#
+# This will all happen remotely on Modal,
+# triggered by Python code running on your local machine
+#
+# This local logic is contained in the `local_entrypoint` below.
+
+
+@app.local_entrypoint()
+def main():
+    print(f"🔥 showing nvidia-smi output for {COMPILE_CONFIG}")
+    nvidia_smi.remote()
+
+    print(f"🔥 compiling our CUDA program for {COMPILE_CONFIG}")
+    prog = nvcc.remote()
+    Path("invsqrt_demo").write_bytes(prog)
+
+    path = Path("ptx") / f"invsqrt_demo_{GPU_SM_ARCH}.ptx"
+    print("🔥 extracting kernel PTX and SASS from binary")
+    print(ptx := cuobjdump.remote(prog))
+    print(f"🔥 saving kernel code to {path}")
+    path.write_text(ptx)
+
+    print(f"🔥 running our CUDA program on the base Modal image on {GPU_CONFIG}")
+    raw_cuda.remote(Path("invsqrt_demo").read_bytes())
+
+
+# ## Using the CUDA Drivers, CUDA Driver API (`libcuda.so`), and Device Management (`nvidia-smi`)
+#
+# All Modal Functions run inside containers,
+# which provide a sort of light-weight virtual machine
+# for code to execute in.
+#
+# All Modal containers with a GPU attached have the NVIDIA CUDA drivers,
+# CUDA Driver API, and device management utilities installed.
+#
+# This happens _outside_ the world of a container.
+# This is actually very common for drivers:
+# a container can't emulate the existence of a printer or a network,
+# for example, unless the host has one.
+#
+# So we can interact with the GPU without installing anything else
+# in our container image.
 
 base_image = modal.Image.debian_slim(python_version="3.11")
 
-GPU_CONFIG = modal.gpu.A10G()
 
-if isinstance(GPU_CONFIG, modal.gpu.T4):
-    raise Exception(
-        "T4 GPUs don't have enough memory to run this example, try an A10G."
-    )
-elif isinstance(GPU_CONFIG, modal.gpu.A10G):
-    GPU_CAPABILITY_CODE = "86"
-elif isinstance(GPU_CONFIG, modal.gpu.L4):
-    GPU_CAPABILITY_CODE = "89"
-elif isinstance(GPU_CONFIG, modal.gpu.A100):
-    GPU_CAPABILITY_CODE = "80"
-elif isinstance(GPU_CONFIG, modal.gpu.H100):
-    GPU_CAPABILITY_CODE = "90"
-else:
-    raise ValueError(
-        f"Not sure how to compile architecture-specific code for {GPU_CONFIG}"
-    )
-
-# All Modal containers with a GPU attached have the NVIDIA CUDA drivers
-# installed and the CUDA Driver API and management libraries available.
-# This happens _outside_ the world of a container.
-# Imagine trying to add a printer driver to a container,
-# it just doesn't make sense.
-
-
-@app.function(gpu=GPU_CONFIG, image=base_image)
+@app.function(gpu=COMPILE_CONFIG, image=base_image)
 def nvidia_smi():
     import subprocess
 
@@ -75,57 +124,17 @@ def nvidia_smi():
         ["nvidia-smi", "-q", "-u", "-x"], capture_output=True
     ).stdout
 
-    driver_version, cuda_version = check_nvidia_smi(output)
+    driver_version, cuda_version = parse_nvidia_smi(output)
     # driver version and CUDA (driver API) version are set by the host
     # not by the container itself!
     assert driver_version.text.split(".")[0] == "550"
     assert cuda_version.text.split(".") == ["12", "4"]
 
 
-# Even if we remove the CUDA Driver API, the base NVIDIA drivers are still present.
-# This is mostly a curiosity, but it underscores the difference between
-# ther raw device drivers, which allow the OS to operate the device,
-# and the user-level C API to those drivers.
-
-
-@app.function(gpu=GPU_CONFIG, image=base_image)
-def remove_libcuda(verbose: bool = True):
-    import os
-    import subprocess
-    import xml.etree.ElementTree as ET
-    from pathlib import Path
-
-    root = Path("/")
-    shared_user_level_dir = root / "usr"
-    shared_library_dir = shared_user_level_dir / "lib"
-    shared_x86_dir = shared_library_dir / "x86_64-linux-gnu"
-
-    # remove libnvidia-ml.so and related files
-    for libcuda_file in shared_x86_dir.glob("libcuda*"):
-        if verbose:
-            print("removing", libcuda_file)
-        os.remove(libcuda_file)
-    if verbose:
-        print()  # empty line
-
-    xml_output = subprocess.run(
-        ["nvidia-smi", "-q", "-u", "-x"], capture_output=True, check=False
-    ).stdout
-    if verbose:
-        print("nvidia-smi still runs!")
-
-    root = ET.fromstring(xml_output)
-    assert root.find("driver_version").text.split(".")[0] == "535"
-    if verbose:
-        print("the NVIDIA drivers are still present")
-    assert root.find("cuda_version").text.lower() == "not found"
-    if verbose:
-        print("but the CUDA Driver API is gone:", "\n")
-        subprocess.run(["nvidia-smi"])
-
+# ## Compiling a CUDA program with `nvcc`
 
 # Even with nothing but the drivers and their API,
-# we can still run packaged CUDA programs.
+# we can still run CUDA programs distributed as binaries.
 #
 # The function below does this in a silly, non-standard way,
 # just to get the point across:
@@ -133,23 +142,23 @@ def remove_libcuda(verbose: bool = True):
 
 
 @app.function(gpu=GPU_CONFIG, image=base_image)
-def raw_cuda(prog: bytes, with_libcuda: bool = True):
-    import os
+def raw_cuda(prog: bytes):
     import subprocess
 
-    if not with_libcuda:
-        remove_libcuda.local(verbose=False)
+    filepath = Path("./prog")
 
-    # open the file in _w_ritable _b_inary mode
-    with open("./prog", "wb") as f:
-        f.write(prog)
-
-    os.chmod("./prog", 0o755)  # make the program executable
+    # write the program to a file
+    filepath.write_bytes(prog)
+    # make the program executable
+    filepath.chmod(0o755)
+    # run it
     subprocess.run(["./prog"])
 
 
+# ### Installing `nvcc` and the CUDA Toolkit
+
 # But to use that, we'll need a compiled CUDA program to run.
-# So let's install the NVIDIA CUDA compiler (nvcc) and the CUDA Toolkit.
+# So let's install the NVIDIA CUDA compiler (`nvcc`).
 # We'll do this on a new image, to underscore that we don't need to install
 # these dependencies just to run CUDA programs.
 
@@ -157,8 +166,11 @@ arch = (
     "x86_64"  # instruction set architecture for the CPU, all Modal machines are x86_64
 )
 distro = "debian11"  # the distribution and version number of our OS (GNU/Linux)
-filename = "cuda-keyring_1.1-1_all.deb"
+filename = "cuda-keyring_1.1-1_all.deb"  # NVIDIA signing key file
 cuda_keyring_url = f"https://developer.download.nvidia.com/compute/cuda/repos/{distro}/{arch}/{filename}"
+
+major, minor = 12, 4
+max_cuda_version = f"{major}-{minor}"
 
 
 cudatoolkit_image = (
@@ -169,53 +181,112 @@ cudatoolkit_image = (
             f"dpkg -i {filename}",
         ]  # otherwise we can't be sure the binaries are from NVIDIA
     )
-    .apt_install("cuda-compiler-12-2")  # MUST BE <= 12.4!
+    .apt_install(  # MUST BE <= 12.4!
+        f"cuda-compiler-{max_cuda_version}",  # nvcc and dependencies
+    )
     .env({"PATH": "/usr/local/cuda/bin:$PATH"})
 )
 
-# Now we can use nvcc to compile a CUDA program.
+# ### Inspecting CUDA binaries with `cuobjdump` and `nvdisasm`
 #
-# We've included a simple CUDA program with this example.
-# It's a translation of the famous fast inverse square root algorithm
-# from Quake II Arena into CUDA C. This is only intended as a fun illustrative example;
-# contemporary GPUs include direct instruction-level support for inverse square roots.
+# When working at this level, a compiler alone is insufficient.
+# So the `cuda-compiler` package we installed includes
+# a number of utilities for working with CUDA binaries.
 #
-# To make the example more interesting, we've run it at "GPU scale":
-# we calculate the result of the algorithm on every single 32-bit floating point number.
+# CUDA binaries on Linux are in a format similar to the ELF format used by Linux executables.
+# But in addition to regular machine code for execution on the host,
+# CUDA binaries contain code for execution on the GPU,
+# which may appear in one of two formats: PTX and SASS.
 #
-# We add the source code to our Modal environment by mounting the local files,
-# adding them to the filesystem of the container running the function.
-# We return the resulting binary as a stream of bytes.
+# PTX, short for "Parallel Thread eXecution", is a sort of intermediate representation for CUDA code.
+# It is a virtual instruction set that can be compiled to the actual instruction set of the GPU.
+# At time of writing, certain advanced features of the Hopper microarchitecture are only accessible
+# via writing inline PTX in CUDA code.
+#
+# SASS, short for "Streaming ASSembly", is the actual assembly code for the GPU --
+# it is a textual representation that corresponds directly to the (undocumented) machine codes
+# that the GPU executes. As such, it is specific to the targeted GPU microarchitecture/compute capability.
+#
+# PTX is forward-compatible: if you compile a CUDA program for a GPU with lower compute capability,
+# the PTX will run on a GPU with higher compute capability. This is achieved by just-in-time (JIT) compilation:
+# the PTX is compiled to SASS at runtime by the CUDA drivers.
+#
+# We can examine PTX with the `cuobjdump` tool that was installed along with the compiler.
+# But we need another piece of the CUDA Toolkit to view both PTX and SASS:
+# `nvdisasm`.
 
 
 @app.function(
-    memory=1024 * 32,  # 32 GB of RAM
-    gpu=GPU_CONFIG,
+    gpu=COMPILE_CONFIG,
+    image=cudatoolkit_image.apt_install(  # add CUDA disassembler
+        f"cuda-nvdisasm-{max_cuda_version}"
+    ),
+)
+def cuobjdump(prog: bytes) -> str:
+    """Extracts the GPU assembly code using cuobjdump, a binary-munging tool from the CUDA Toolkit."""
+    import subprocess
+
+    filepath = Path("./prog")
+    filepath.write_bytes(prog)
+
+    result = subprocess.run(
+        ["cuobjdump", "-ptx", "-sass", "./prog"], capture_output=True, text=True
+    )
+
+    if result.returncode:
+        raise Exception(result.stderr)
+
+    return result.stdout
+
+
+# ### Compiling a CUDA program with `nvcc`
+#
+# Now we can use `nvcc` to compile a CUDA program.
+#
+# We've included a simple CUDA program with this example.
+# It's a translation of the famous fast inverse square root algorithm
+# from Quake III Arena into CUDA C. This is only intended as a fun illustrative example;
+# contemporary GPUs include direct instruction-level support for inverse square roots.
+#
+# The CUDA "kernel" for this example, which contains all the code that execute on the GPU,
+# is in the `invsqrt_kernel.cu`.
+#
+# To make the example more interesting, we include a CUDA program to run it at "GPU scale":
+# we calculate the result of the algorithm on every single 32-bit floating point number.
+# This logic is in `every_invsqrt.cu`.
+#
+# We add the source code to our Modal environment by `mount`ing the local files,
+# adding them to the filesystem of the container running the function.
+# We return the resulting binary as a sequence of bytes.
+#
+# Like most compilers, `nvcc` has lots of arguments.
+# Review the comments next to the arguments for explanations.
+
+
+@app.function(
     image=cudatoolkit_image,
     mounts=[
         modal.Mount.from_local_file("invsqrt_kernel.cu", "/root/invsqrt_kernel.cu"),
         modal.Mount.from_local_file("every_invsqrt.cu", "/root/every_invsqrt.cu"),
     ],
 )
-def compile(and_run: bool = False):
+def nvcc():
     import subprocess
     from pathlib import Path
-
-    cc_code = GPU_CAPABILITY_CODE
 
     # settings below are designed for easily-understood PTX, not performance!
     assert not subprocess.run(
         [
-            "nvcc",  # run nvidia cuda compiler (which also calls the gcc toolchain)
-            f"-arch=compute_{cc_code}",  # generate PTX machine code compatible with the GPU architecture
-            f"-code=sm_{cc_code},compute_{cc_code}",  # and a binary optimized for the GPU architecture
+            "nvcc",  # run nvidia cuda compiler
+            f"-arch=compute_{GPU_SM_ARCH}",  # generate PTX machine code compatible with the GPU architecture and future architectures
+            f"-code=sm_{GPU_SM_ARCH},compute_{GPU_SM_ARCH}",  # and a SASS binary optimized for the GPU architecture
             "-g",  # include debug symbols
             "-O0",  # no optimization from nvcc, keep PTX assembly simple
             "-Xcompiler",  # and for the gcc toolchain
             "-Og",  # also limit the optimization
-            "-v",  # show verbose output
-            "-lineinfo",  # and line numbers in machine code
-            "-o",  # and send output to
+            "-lineinfo",  # add line numbers in machine code
+            "-v",  # show verbose log output
+            "-o",  # and send binary output to
             "invsqrt_demo",  # a binary called invsqrt_demo
             "invsqrt_kernel.cu",  # compiling the kernel
             "every_invsqrt.cu",  # and the host code
@@ -225,69 +296,22 @@ def compile(and_run: bool = False):
         check=True,
     ).returncode
 
-    assert not subprocess.run(["./invsqrt_demo"], capture_output=not and_run).returncode
-
     return Path("./invsqrt_demo").read_bytes()
 
 
-@app.function(gpu=GPU_CONFIG, image=cudatoolkit_image)
-def dump_ptx(prog: bytes) -> str:
-    """Extracts the GPU assembly code using cuobjdump a binary-munging tool from the CUDA Toolkit."""
-    import subprocess
-
-    with open("./prog", "wb") as f:
-        f.write(prog)
-
-    result = subprocess.run(
-        ["cuobjdump", "-ptx", "./prog"], capture_output=True, text=True
-    )
-
-    if result.returncode:
-        raise Exception(result.stderr)
-
-    return result.stdout
-
-
-# The `main` function below puts this all together:
-# it compiles the CUDA program, then shows the output of `nvidia-smi`
-# in the environment it will be running in,
-# then runs the program. Note that we run it on the base image,
-# _without_ `libcudart` or any other dependencies installed.
+# ## Running the example
 #
-# You can pass the flag `--no-with-libcuda` to see what happens
-# when the CUDA Driver API is removed at run time.
-# While `nvidia-smi` still runs, it no longer
-# reports a CUDA version, and the program cannot run.
+# That's all the code for this example.
+# You can run it by executing the command
+#
+# ```bash
+# modal run use_cuda.py
+# ```
+#
+# The rest of the code in this example is utility code.
 
 
-@app.local_entrypoint()
-def main(with_libcuda: bool = True):
-    print(f"🔥 compiling our CUDA kernel on {GPU_CONFIG}")
-    prog = compile.remote()
-    with open("invsqrt_demo", "wb") as f:
-        f.write(prog)
-
-    path = Path("ptx") / f"invsqrt_demo_{GPU_CAPABILITY_CODE}.ptx"
-    print(f"🔥 dumping the PTX assembly code to {path}")
-    ptx = dump_ptx.remote(prog)
-    with open(path, "w") as f:
-        f.write(ptx)
-
-    if with_libcuda:
-        print("🔥 showing nvidia-smi output")
-        nvidia_smi.remote()
-    else:
-        print("🔥 removing libcuda to show what breaks")
-
-    print("🔥 running our CUDA kernel")
-    with open("invsqrt_demo", "rb") as f:
-        prog = f.read()
-
-    print("🔥 running on the base Modal image, no dependencies added")
-    raw_cuda.remote(prog, with_libcuda)
-
-
-def check_nvidia_smi(xml_output):
+def parse_nvidia_smi(xml_output):
     """Utility for parsing version info from nvidia-smi's XML output"""
     import xml.etree.ElementTree as ET
 
