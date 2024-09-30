@@ -19,16 +19,16 @@ int main()
     CUresult res = cuInit(0);
     checkCudaDriverError(res, "CUDA Driver API initialization failed");
 
-    // set up memory on the host
-    long long size = 1LL << 10; // kilo
-    size = size << 10;          // mega
-    size = size << 10;          // giga
-    size = 2 * size;            // 2^32 = 4 giga
+    // set up memory on the host: enough to store all 2^32 float32s
+    long long size = 1LL << 9; // kilo
+    size = size << 10;         // mega
+    size = size << 10;         // giga
+    size = 2 * 2 * size;       // 2^32 = 4 giga
 
     float *h_X = (float *)malloc(size * sizeof(float));
     float *h_out = (float *)malloc(size * sizeof(float));
 
-    checkHostAllocation(h_X, "Failed to allocate host memory for input");
+    checkHostAllocation(h_X, "Failed to allocate host memory");
     checkHostAllocation(h_out, "Failed to allocate host memory for output");
 
     for (uint32_t i = 0; i < size; i++)
@@ -41,14 +41,14 @@ int main()
 
     // set up memory on the device
     cudaError_t status; // track status of cuda runtime API calls
-    float *d_X, *d_out;
+    float *d_X;
 
     // cudaMalloc takes a void **: generic pointer to a pointer
     status = cudaMalloc((void **)&d_X, size * sizeof(float));
     checkCudaError(status, "Failed to allocate device memory for input");
 
-    status = cudaMalloc((void **)&d_out, size * sizeof(float));
-    checkCudaError(status, "Failed to allocate device memory for output");
+    // status = cudaMalloc((void **)&d_out, size * sizeof(float));
+    // checkCudaError(status, "Failed to allocate device memory for output");
 
     status = cudaMemcpy(d_X, h_X, size * sizeof(float), cudaMemcpyHostToDevice);
     checkCudaError(status, "Failed to copy input to device");
@@ -58,10 +58,16 @@ int main()
     int blocksInGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     // "launch" the kernel on the GPU, go brrr
-    invsqrt_kernel<<<blocksInGrid, threadsPerBlock>>>(d_out, d_X, size);
+    invsqrt_kernel<<<blocksInGrid, threadsPerBlock>>>(d_X, d_X, size);
+
+    // check for issues in kernel launch, like missing binary
+    checkCudaError(cudaGetLastError(), "Kernel launch failed");
+    // check for issues in kernel execution
+    checkCudaError(cudaDeviceSynchronize(), "Kernel execution failed");
 
     // bring the data back onto the host
-    cudaMemcpy(h_out, d_out, size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out, d_X, size * sizeof(float), cudaMemcpyDeviceToHost);
+    checkCudaError(status, "Failed to copy output from device");
 
     // print out representative results
     printf("printing first 10 entries\n");
@@ -91,7 +97,7 @@ int main()
     free(h_X);
     free(h_out);
     cudaFree(d_X);
-    cudaFree(d_out);
+    // cudaFree(d_out);
 
     return 0;
 }
