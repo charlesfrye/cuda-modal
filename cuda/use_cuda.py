@@ -43,19 +43,19 @@ app = modal.App("example-cuda-fast-invsqrt")
 # Different SM architectures have distinct capabilities
 # and support distinct instruction sets.
 
-GPU_CONFIG = modal.gpu.H100()  # highest CC on Modal
-COMPILE_CONFIG = modal.gpu.T4()  # lowest CC on Modal
+GPU_CONFIG = "H100"  # highest CC on Modal
+COMPILE_CONFIG = "T4" # lowest CC on Modal
 
 
-if isinstance(COMPILE_CONFIG, modal.gpu.T4):
+if COMPILE_CONFIG == "T4":
     GPU_SM_ARCH = "75"  # Turing 12nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.A100):
+elif COMPILE_CONFIG == "A100":
     GPU_SM_ARCH = "80"  # Ampere 7nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.A10G):
+elif COMPILE_CONFIG == "A10G":
     GPU_SM_ARCH = "86"  # Ampere 8nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.L4):
+elif COMPILE_CONFIG == "L4":
     GPU_SM_ARCH = "89"  # Lovelace 5nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.H100):
+elif COMPILE_CONFIG == "H100":
     GPU_SM_ARCH = "90"  # Hopper 5nm microarchitecture
 else:
     raise ValueError(
@@ -263,13 +263,9 @@ def cuobjdump(prog: bytes) -> str:
 # Review the comments next to the arguments for explanations.
 
 
-@app.function(
-    image=cudatoolkit_image,
-    mounts=[
-        modal.Mount.from_local_file("invsqrt_kernel.cu", "/root/invsqrt_kernel.cu"),
-        modal.Mount.from_local_file("every_invsqrt.cu", "/root/every_invsqrt.cu"),
-    ],
-)
+cudatoolkit_image = cudatoolkit_image.add_local_file("invsqrt_kernel.cu", "/root/invsqrt_kernel.cu")
+cudatoolkit_image = cudatoolkit_image.add_local_file("every_invsqrt.cu", "/root/every_invsqrt.cu")
+@app.function(image=cudatoolkit_image)
 def nvcc():
     import subprocess
     from pathlib import Path
