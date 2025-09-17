@@ -43,24 +43,27 @@ app = modal.App("example-cuda-fast-invsqrt")
 # Different SM architectures have distinct capabilities
 # and support distinct instruction sets.
 
-GPU_CONFIG = modal.gpu.H100()  # highest CC on Modal
-COMPILE_CONFIG = modal.gpu.T4()  # lowest CC on Modal
+GPU_CONFIG = "H100"
+COMPILE_CONFIG = "T4"  # lowest CC on Modal
 
 
-if isinstance(COMPILE_CONFIG, modal.gpu.T4):
-    GPU_SM_ARCH = "75"  # Turing 12nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.A100):
-    GPU_SM_ARCH = "80"  # Ampere 7nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.A10G):
-    GPU_SM_ARCH = "86"  # Ampere 8nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.L4):
-    GPU_SM_ARCH = "89"  # Lovelace 5nm microarchitecture
-elif isinstance(COMPILE_CONFIG, modal.gpu.H100):
-    GPU_SM_ARCH = "90"  # Hopper 5nm microarchitecture
-else:
-    raise ValueError(
-        f"Not sure how to compile architecture-specific code for {COMPILE_CONFIG}"
-    )
+match COMPILE_CONFIG:
+    case "T4":
+        GPU_SM_ARCH = "75"  # Turing 12nm microarchitecture
+    case "A100":
+        GPU_SM_ARCH = "80"  # Ampere 7nm microarchitecture
+    case "A10":
+        GPU_SM_ARCH = "86"  # Ampere 8nm microarchitecture
+    case "L40S":
+        GPU_SM_ARCH = "89"  # Lovelace 5nm microarchitecture
+    case "L4":
+        GPU_SM_ARCH = "89"  # Lovelace 5nm microarchitecture
+    case "H100":
+        GPU_SM_ARCH = "90"  # Hopper 5nm microarchitecture
+    case _:
+        raise ValueError(
+            f"Not sure how to compile architecture-specific code for {COMPILE_CONFIG}"
+        )
 
 # ## Overview: Compiling, executing, and inspecting CUDA binaries on Modal
 #
@@ -127,8 +130,8 @@ def nvidia_smi():
     driver_version, cuda_version = parse_nvidia_smi(output)
     # driver version and CUDA (driver API) version are set by the host
     # not by the container itself!
-    assert driver_version.text.split(".")[0] == "550"
-    assert cuda_version.text.split(".") == ["12", "4"]
+    assert driver_version.text.split(".")[0] == "575", driver_version.text
+    assert cuda_version.text.split(".") == ["12", "9"], cuda_version.text
 
 
 # ## Compiling a CUDA program with `nvcc`
@@ -264,11 +267,9 @@ def cuobjdump(prog: bytes) -> str:
 
 
 @app.function(
-    image=cudatoolkit_image,
-    mounts=[
-        modal.Mount.from_local_file("invsqrt_kernel.cu", "/root/invsqrt_kernel.cu"),
-        modal.Mount.from_local_file("every_invsqrt.cu", "/root/every_invsqrt.cu"),
-    ],
+    image=cudatoolkit_image.add_local_file(
+        "invsqrt_kernel.cu", "/root/invsqrt_kernel.cu"
+    ).add_local_file("every_invsqrt.cu", "/root/every_invsqrt.cu"),
 )
 def nvcc():
     import subprocess
